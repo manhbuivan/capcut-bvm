@@ -16,10 +16,11 @@ class ComposeWorker(QThread):
     finished = Signal(str)  # output path
     error = Signal(str)
 
-    def __init__(self, images_folder, audio_path, srt_path, output_path, config):
+    def __init__(self, mode, images_folder, audio_input, srt_path, output_path, config):
         super().__init__()
+        self.mode = mode  # "paired" or "single_audio"
         self.images_folder = images_folder
-        self.audio_path = audio_path
+        self.audio_input = audio_input  # folder (paired) or file path (single)
         self.srt_path = srt_path
         self.output_path = output_path
         self.config = config
@@ -31,12 +32,20 @@ class ComposeWorker(QThread):
             composer = VideoComposer(config=config)
             composer.set_progress_callback(self._on_progress)
 
-            composer.compose(
-                images_folder=self.images_folder,
-                audio_path=self.audio_path,
-                srt_path=self.srt_path if self.srt_path else None,
-                output_path=self.output_path,
-            )
+            if self.mode == "paired":
+                composer.compose_paired(
+                    images_folder=self.images_folder,
+                    audios_folder=self.audio_input,
+                    srt_path=self.srt_path if self.srt_path else None,
+                    output_path=self.output_path,
+                )
+            else:
+                composer.compose(
+                    images_folder=self.images_folder,
+                    audio_path=self.audio_input,
+                    srt_path=self.srt_path if self.srt_path else None,
+                    output_path=self.output_path,
+                )
             self.finished.emit(self.output_path)
 
         except Exception as e:
@@ -62,11 +71,23 @@ class VideoComposeTab(QWidget):
         input_group = QGroupBox("📂 File đầu vào")
         input_layout = QVBoxLayout(input_group)
 
+        # Mode selector
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(QLabel("Chế độ:"))
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItems([
+            "🔗 Nhiều audio + Nhiều ảnh (map 1:1 theo thứ tự)",
+            "🎵 1 audio + Nhiều ảnh (chia đều)",
+        ])
+        self.mode_combo.currentIndexChanged.connect(self._on_mode_changed)
+        mode_row.addWidget(self.mode_combo, 1)
+        input_layout.addLayout(mode_row)
+
         # Images folder
         img_row = QHBoxLayout()
         img_row.addWidget(QLabel("🖼️ Thư mục ảnh:"))
         self.images_edit = QLineEdit()
-        self.images_edit.setPlaceholderText("Chọn folder chứa ảnh (sắp xếp theo tên)")
+        self.images_edit.setPlaceholderText("Chọn folder chứa ảnh (sort theo tên: 001.jpg, 002.jpg...)")
         self.images_edit.setReadOnly(True)
         img_row.addWidget(self.images_edit, 1)
         btn_img = QPushButton("Chọn")
@@ -79,17 +100,41 @@ class VideoComposeTab(QWidget):
         self.img_info_label.setObjectName("subtitleLabel")
         input_layout.addWidget(self.img_info_label)
 
-        # Audio file
-        audio_row = QHBoxLayout()
-        audio_row.addWidget(QLabel("🎵 Audio:"))
+        # Audio folder (mode paired)
+        self.audio_folder_row = QHBoxLayout()
+        self.audio_folder_label = QLabel("🎵 Thư mục audio:")
+        self.audio_folder_row.addWidget(self.audio_folder_label)
+        self.audios_folder_edit = QLineEdit()
+        self.audios_folder_edit.setPlaceholderText("Chọn folder chứa audio (sort theo tên: 001.mp3, 002.mp3...)")
+        self.audios_folder_edit.setReadOnly(True)
+        self.audio_folder_row.addWidget(self.audios_folder_edit, 1)
+        self.btn_audios_folder = QPushButton("Chọn")
+        self.btn_audios_folder.clicked.connect(self._browse_audios_folder)
+        self.audio_folder_row.addWidget(self.btn_audios_folder)
+        input_layout.addLayout(self.audio_folder_row)
+
+        # Audio folder info
+        self.audio_info_label = QLabel("")
+        self.audio_info_label.setObjectName("subtitleLabel")
+        input_layout.addWidget(self.audio_info_label)
+
+        # Single audio file (mode single)
+        self.audio_file_row = QHBoxLayout()
+        self.audio_file_label = QLabel("🎵 File audio:")
+        self.audio_file_row.addWidget(self.audio_file_label)
         self.audio_edit = QLineEdit()
         self.audio_edit.setPlaceholderText("Chọn file audio (mp3, wav, ...)")
         self.audio_edit.setReadOnly(True)
-        audio_row.addWidget(self.audio_edit, 1)
-        btn_audio = QPushButton("Chọn")
-        btn_audio.clicked.connect(self._browse_audio)
-        audio_row.addWidget(btn_audio)
-        input_layout.addLayout(audio_row)
+        self.audio_file_row.addWidget(self.audio_edit, 1)
+        self.btn_audio_file = QPushButton("Chọn")
+        self.btn_audio_file.clicked.connect(self._browse_audio)
+        self.audio_file_row.addWidget(self.btn_audio_file)
+        input_layout.addLayout(self.audio_file_row)
+
+        # Hide single audio by default
+        self.audio_file_label.hide()
+        self.audio_edit.hide()
+        self.btn_audio_file.hide()
 
         # SRT file (optional)
         srt_row = QHBoxLayout()
@@ -216,11 +261,19 @@ class VideoComposeTab(QWidget):
         folder = QFileDialog.getExistingDirectory(self, "Chọn thư mục ảnh")
         if folder:
             self.images_edit.setText(folder)
-            # Count images
             exts = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
             count = sum(1 for f in os.listdir(folder)
                         if os.path.splitext(f)[1].lower() in exts)
             self.img_info_label.setText(f"📌 {count} ảnh tìm thấy")
+
+    def _browse_audios_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "Chọn thư mục audio")
+        if folder:
+            self.audios_folder_edit.setText(folder)
+            exts = {".mp3", ".wav", ".flac", ".aac", ".ogg", ".m4a", ".wma"}
+            count = sum(1 for f in os.listdir(folder)
+                        if os.path.splitext(f)[1].lower() in exts)
+            self.audio_info_label.setText(f"📌 {count} audio tìm thấy")
 
     def _browse_audio(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -229,6 +282,27 @@ class VideoComposeTab(QWidget):
         )
         if path:
             self.audio_edit.setText(path)
+
+    def _on_mode_changed(self, index):
+        """Toggle UI between paired mode and single audio mode."""
+        if index == 0:
+            # Paired mode: nhiều audio
+            self.audio_folder_label.show()
+            self.audios_folder_edit.show()
+            self.btn_audios_folder.show()
+            self.audio_info_label.show()
+            self.audio_file_label.hide()
+            self.audio_edit.hide()
+            self.btn_audio_file.hide()
+        else:
+            # Single audio mode
+            self.audio_folder_label.hide()
+            self.audios_folder_edit.hide()
+            self.btn_audios_folder.hide()
+            self.audio_info_label.hide()
+            self.audio_file_label.show()
+            self.audio_edit.show()
+            self.btn_audio_file.show()
 
     def _browse_srt(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -258,23 +332,37 @@ class VideoComposeTab(QWidget):
 
     def _start_compose(self):
         images_folder = self.images_edit.text().strip()
-        audio_path = self.audio_edit.text().strip()
         srt_path = self.srt_edit.text().strip()
         output_path = self.output_edit.text().strip()
 
-        # Validate
+        is_paired = self.mode_combo.currentIndex() == 0
+
         if not images_folder:
             QMessageBox.warning(self, "Lỗi", "Chưa chọn thư mục ảnh!")
             return
-        if not audio_path:
-            QMessageBox.warning(self, "Lỗi", "Chưa chọn file audio!")
-            return
+
+        if is_paired:
+            audio_input = self.audios_folder_edit.text().strip()
+            if not audio_input:
+                QMessageBox.warning(self, "Lỗi", "Chưa chọn thư mục audio!")
+                return
+            mode = "paired"
+        else:
+            audio_input = self.audio_edit.text().strip()
+            if not audio_input:
+                QMessageBox.warning(self, "Lỗi", "Chưa chọn file audio!")
+                return
+            mode = "single_audio"
+
         if not output_path:
-            # Auto generate output path
-            output_path = os.path.join(
-                os.path.dirname(audio_path),
-                os.path.splitext(os.path.basename(audio_path))[0] + "_video.mp4"
-            )
+            if is_paired:
+                output_path = os.path.join(images_folder, "..", "output_video.mp4")
+            else:
+                output_path = os.path.join(
+                    os.path.dirname(audio_input),
+                    os.path.splitext(os.path.basename(audio_input))[0] + "_video.mp4"
+                )
+            output_path = os.path.abspath(output_path)
             self.output_edit.setText(output_path)
 
         # Build config
@@ -294,8 +382,9 @@ class VideoComposeTab(QWidget):
 
         # Start worker
         self._worker = ComposeWorker(
+            mode=mode,
             images_folder=images_folder,
-            audio_path=audio_path,
+            audio_input=audio_input,
             srt_path=srt_path if srt_path else None,
             output_path=output_path,
             config=config,

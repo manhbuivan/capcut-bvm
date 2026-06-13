@@ -1,16 +1,16 @@
 """Video Composer: ghép audio + ảnh + subtitle → video hoàn chỉnh bằng FFmpeg.
 
-Workflow:
-1. Đưa vào: folder ảnh + file audio + file SRT
-2. Tạo slideshow từ ảnh (chia đều hoặc theo timing tùy chỉnh)
-3. Ghép audio lên slideshow
-4. Burn subtitle vào video
-5. Xuất file MP4 hoàn chỉnh
+Hỗ trợ 2 mode:
+- Mode 1 (nhiều audio + nhiều ảnh): Mỗi ảnh map với 1 audio theo thứ tự tên file
+  001.jpg + 001.mp3 → đoạn 1, 002.jpg + 002.mp3 → đoạn 2, ...
+  Ảnh hiển thị đúng bằng thời lượng audio tương ứng.
+
+- Mode 2 (1 audio + nhiều ảnh): Chia đều thời lượng audio cho các ảnh.
 """
 import os
 import subprocess
 import shutil
-from typing import List, Optional, Callable
+from typing import List, Optional, Callable, Tuple
 from dataclasses import dataclass
 
 
@@ -29,7 +29,7 @@ class ComposerConfig:
     audio_bitrate: str = "192k"
 
     # Slideshow
-    image_duration: float = 0.0         # 0 = tự chia đều theo audio duration
+    image_duration: float = 0.0         # 0 = tự tính theo audio
     transition: str = "fade"            # fade, none
     transition_duration: float = 0.5    # Seconds
 
@@ -48,17 +48,33 @@ class ComposerConfig:
 class VideoComposer:
     """Ghép audio + ảnh + subtitle thành video MP4 bằng FFmpeg.
 
+    Hỗ trợ:
+    - Nhiều audio + nhiều ảnh (map 1:1 theo tên)
+    - 1 audio + nhiều ảnh (chia đều)
+    - 1 ảnh + 1 audio (video tĩnh)
+
     Usage:
         composer = VideoComposer()
+
+        # Mode 1: Nhiều audio + nhiều ảnh
+        composer.compose_paired(
+            images_folder="/path/to/images",
+            audios_folder="/path/to/audios",
+            srt_path="/path/to/subtitle.srt",
+            output_path="output.mp4",
+        )
+
+        # Mode 2: 1 audio + nhiều ảnh
         composer.compose(
             images_folder="/path/to/images",
             audio_path="/path/to/audio.mp3",
             srt_path="/path/to/subtitle.srt",
-            output_path="/path/to/output.mp4",
+            output_path="output.mp4",
         )
     """
 
     SUPPORTED_IMAGES = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tiff"}
+    SUPPORTED_AUDIOS = {".mp3", ".wav", ".flac", ".aac", ".ogg", ".m4a", ".wma"}
 
     def __init__(self, ffmpeg_path: str = "ffmpeg", config: ComposerConfig = None):
         self.ffmpeg_path = ffmpeg_path
@@ -83,10 +99,150 @@ class VideoComposer:
         if self._progress_callback:
             self._progress_callback(msg, pct)
 
+    # ===== MODE 1: Nhiều audio + nhiều ảnh (map 1:1) =====
+
+    def compose_paired(self, images_folder: str, audios_folder: str,
+                       srt_path: Optional[str] = None,
+                       output_path: str = "output.mp4") -> str:
+        """Ghép nhiều ảnh + nhiều audio theo thứ tự → video.
+
+        Mỗi ảnh sẽ hiển thị đúng bằng thời lượng audio tương ứng.
+        Ví dụ: 001.jpg + 001.mp3, 002.jpg + 002.mp3, ...
+
+        Args:
+            images_folder: Thư mục ảnh (sort theo tên)
+            audios_folder: Thư mục audio (sort theo tên)
+            srt_path: File .srt subtitle (optional)
+            output_path: File video output
+
+        Returns:
+            Đường dẫn video đã tạo
+        """
+        # Validate
+        if not os.path.isdir(images_folder):
+            raise FileNotFoundError(f"Thư mục ảnh không tồn tại: {images_folder}")
+        if not os.path.isdir(audios_folder):
+            raise FileNotFoundError(f"Thư mục audio không tồn tại: {audios_folder}")
+
+        # Get sorted files
+        images = self._get_sorted_images(images_folder)
+        audios = self._get_sorted_audios(audios_folder)
+
+        if not images:
+            raise ValueError("Không tìm thấy ảnh nào!")
+        if not audios:
+            raise ValueError("Không tìm thấy audio nào!")
+
+        # Map pairs
+        pairs = self._map_pairs(images, audios)
+        if not pairs:
+            raise ValueError("Không thể ghép ảnh với audio. Kiểm tra lại số lượng file!")
+
+        self._report(f"Tìm thấy {len(pairs)} cặp ảnh+audio", 5)
+
+        # Get duration for each audio
+        self._report("Đang phân tích thời lượng audio...", 10)
+        durations = []
+        for _, audio_path in pairs:
+            dur = self._get_duration(audio_path)
+            durations.append(dur)
+
+        total_duration = sum(durations)
+        self._report(f"Tổng thời lượng: {total_duration:.1f}s", 15)
+
+        # Step 1: Tạo từng đoạn video (ảnh + audio)
+        self._report("Đang tạo từng đoạn video...", 20)
+        temp_segments = []
+        for i, ((img_path, audio_path), duration) in enumerate(zip(pairs, durations)):
+            pct = 20 + (i / len(pairs)) * 50
+            self._report(f"Đoạn {i+1}/{len(pairs)}: {os.path.basename(img_path)}", pct)
+
+            seg_path = output_path + f".seg_{i:04d}.mp4"
+            self._create_segment(img_path, audio_path, seg_path)
+            temp_segments.append(seg_path)
+
+        # Step 2: Nối tất cả segments
+        self._report("Đang nối các đoạn...", 75)
+        merged_path = output_path + ".merged.mp4"
+        self._concat_segments(temp_segments, merged_path)
+
+        # Step 3: Burn subtitle (if provided)
+        if srt_path and os.path.isfile(srt_path):
+            self._report("Đang burn subtitle...", 85)
+            self._burn_subtitle(merged_path, srt_path, output_path)
+        else:
+            shutil.move(merged_path, output_path)
+
+        # Cleanup
+        self._report("Đang dọn dẹp...", 95)
+        self._cleanup_temp(temp_segments + [merged_path])
+
+        self._report("✅ Hoàn tất!", 100)
+        return output_path
+
+    def _map_pairs(self, images: List[str], audios: List[str]) -> List[Tuple[str, str]]:
+        """Map ảnh với audio theo thứ tự.
+
+        Nếu số lượng khác nhau, lấy min(images, audios).
+        """
+        count = min(len(images), len(audios))
+        return [(images[i], audios[i]) for i in range(count)]
+
+    def _create_segment(self, image_path: str, audio_path: str, output_path: str):
+        """Tạo 1 đoạn video từ 1 ảnh + 1 audio."""
+        w, h = self.config.resolution.split("x")
+
+        cmd = [
+            self.ffmpeg_path,
+            "-loop", "1",
+            "-i", image_path,
+            "-i", audio_path,
+            "-vf", (
+                f"scale={w}:{h}:force_original_aspect_ratio=decrease,"
+                f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:black"
+            ),
+            "-c:v", self.config.video_codec,
+            "-preset", self.config.preset,
+            "-b:v", self.config.video_bitrate,
+            "-c:a", self.config.audio_codec,
+            "-b:a", self.config.audio_bitrate,
+            "-r", str(self.config.fps),
+            "-pix_fmt", "yuv420p",
+            "-shortest",
+            "-y",
+            output_path
+        ]
+        self._run_ffmpeg(cmd)
+
+    def _concat_segments(self, segments: List[str], output_path: str):
+        """Nối nhiều video segments thành 1 file."""
+        concat_file = output_path + ".concat.txt"
+
+        with open(concat_file, "w", encoding="utf-8") as f:
+            for seg in segments:
+                escaped = seg.replace("'", "'\\''")
+                f.write(f"file '{escaped}'\n")
+
+        cmd = [
+            self.ffmpeg_path,
+            "-f", "concat",
+            "-safe", "0",
+            "-i", concat_file,
+            "-c", "copy",
+            "-y",
+            output_path
+        ]
+        self._run_ffmpeg(cmd)
+
+        if os.path.exists(concat_file):
+            os.remove(concat_file)
+
+    # ===== MODE 2: 1 audio + nhiều ảnh (chia đều) =====
+
     def compose(self, images_folder: str, audio_path: str,
                 srt_path: Optional[str] = None,
                 output_path: str = "output.mp4") -> str:
-        """Ghép ảnh + audio + subtitle → video.
+        """Ghép 1 audio + nhiều ảnh (chia đều thời lượng) → video.
 
         Args:
             images_folder: Thư mục chứa ảnh (sắp xếp theo tên)
@@ -97,52 +253,41 @@ class VideoComposer:
         Returns:
             Đường dẫn file video đã tạo
         """
-        # Validate inputs
         if not os.path.isdir(images_folder):
             raise FileNotFoundError(f"Thư mục ảnh không tồn tại: {images_folder}")
         if not os.path.isfile(audio_path):
             raise FileNotFoundError(f"File audio không tồn tại: {audio_path}")
-        if srt_path and not os.path.isfile(srt_path):
-            raise FileNotFoundError(f"File SRT không tồn tại: {srt_path}")
 
-        # Get images sorted
         images = self._get_sorted_images(images_folder)
         if not images:
             raise ValueError("Không tìm thấy ảnh nào trong thư mục!")
 
-        # Get audio duration
         self._report("Đang phân tích audio...", 5)
         audio_duration = self._get_duration(audio_path)
         if audio_duration <= 0:
             raise ValueError("Không thể đọc thời lượng audio!")
 
-        # Calculate image duration
-        if self.config.image_duration > 0:
-            img_duration = self.config.image_duration
-        else:
-            img_duration = audio_duration / len(images)
+        img_duration = audio_duration / len(images)
 
-        # Create output directory
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
 
-        # Step 1: Create slideshow from images
+        # Create slideshow
         self._report(f"Đang tạo slideshow từ {len(images)} ảnh...", 15)
         slideshow_path = output_path + ".slideshow.mp4"
         self._create_slideshow(images, slideshow_path, img_duration, audio_duration)
 
-        # Step 2: Add audio
+        # Add audio
         self._report("Đang ghép audio...", 50)
         with_audio_path = output_path + ".with_audio.mp4"
         self._add_audio(slideshow_path, audio_path, with_audio_path)
 
-        # Step 3: Burn subtitle (if provided)
-        if srt_path:
+        # Burn subtitle
+        if srt_path and os.path.isfile(srt_path):
             self._report("Đang burn subtitle vào video...", 75)
             self._burn_subtitle(with_audio_path, srt_path, output_path)
         else:
             shutil.move(with_audio_path, output_path)
 
-        # Cleanup temp files
         self._report("Đang dọn dẹp...", 95)
         self._cleanup_temp([slideshow_path, with_audio_path])
 
@@ -234,6 +379,15 @@ class VideoComposer:
             if ext in self.SUPPORTED_IMAGES:
                 images.append(os.path.join(folder, name))
         return images
+
+    def _get_sorted_audios(self, folder: str) -> List[str]:
+        """Get audio files from folder, sorted by name."""
+        audios = []
+        for name in sorted(os.listdir(folder)):
+            ext = os.path.splitext(name)[1].lower()
+            if ext in self.SUPPORTED_AUDIOS:
+                audios.append(os.path.join(folder, name))
+        return audios
 
     def _get_duration(self, file_path: str) -> float:
         """Get media file duration in seconds."""
