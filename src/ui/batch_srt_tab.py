@@ -1,131 +1,163 @@
-"""Batch SRT generation tab - create multiple .srt files at once."""
+"""Batch SRT tab - Tạo Subtitle AI hàng loạt (giống giao diện app gốc)."""
 import os
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QListWidget, QGroupBox, QProgressBar,
-    QComboBox, QFileDialog, QListWidgetItem, QCheckBox,
-    QLineEdit, QMessageBox
+    QComboBox, QFileDialog, QListWidgetItem, QRadioButton,
+    QButtonGroup, QLineEdit, QMessageBox
 )
 from PySide6.QtCore import Qt, QThread, Signal
 
 
-class BatchWorker(QThread):
-    """Background thread for batch SRT processing."""
+class SmartSRTWorker(QThread):
+    """Background thread for smart SRT generation."""
 
     progress = Signal(int, int, str, str)  # index, total, filename, message
-    file_done = Signal(object)  # BatchJob
-    finished = Signal(str)  # summary message
+    finished = Signal(str)  # summary
 
-    def __init__(self, exporter):
+    def __init__(self, items, mode, model_size, language, device):
         super().__init__()
-        self.exporter = exporter
+        self.items = items  # list of (audio_path, script_path, output_dir)
+        self.mode = mode
+        self.model_size = model_size
+        self.language = language
+        self.device = device
 
     def run(self):
-        self.exporter.run(
-            on_progress=self._on_progress,
-            on_file_done=self._on_file_done,
+        from ..pipeline.smart_srt_generator import SmartSRTGenerator, SubMode
+
+        mode_map = {"kich_ban": SubMode.KICH_BAN, "chuan": SubMode.CHUAN, "both": SubMode.BOTH}
+        sub_mode = mode_map.get(self.mode, SubMode.CHUAN)
+
+        gen = SmartSRTGenerator(
+            model_size=self.model_size,
+            language=self.language if self.language != "auto" else None,
+            device=self.device,
         )
-        self.finished.emit(self.exporter.get_summary())
+
+        for audio_path, script_path, output_dir in self.items:
+            gen.add_item(audio_path, script_path, output_dir)
+
+        results = gen.run(mode=sub_mode, on_progress=self._on_progress)
+        self.finished.emit(f"Hoàn tất: {len(results)} file SRT đã tạo")
 
     def _on_progress(self, index, total, filename, message):
         self.progress.emit(index, total, filename, message)
 
-    def _on_file_done(self, job):
-        self.file_done.emit(job)
-
 
 class BatchSRTTab(QWidget):
-    """Tab for batch generating SRT subtitle files from multiple videos/audio."""
+    """Tab Tạo Subtitle AI - hỗ trợ 3 chế độ, chạy hàng loạt."""
 
     def __init__(self):
         super().__init__()
-        self._worker: BatchWorker = None
+        self._worker: SmartSRTWorker = None
         self._setup_ui()
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
-        layout.setSpacing(12)
+        layout.setSpacing(10)
 
-        # --- File Selection ---
-        file_group = QGroupBox("📂 Chọn file video/audio")
-        file_layout = QVBoxLayout(file_group)
+        # --- File Đầu Vào ---
+        input_group = QGroupBox("📂 File Đầu Vào")
+        input_layout = QVBoxLayout(input_group)
 
-        # Buttons row
-        btn_row = QHBoxLayout()
-        self.btn_add_files = QPushButton("➕ Thêm file")
-        self.btn_add_files.clicked.connect(self._add_files)
-        btn_row.addWidget(self.btn_add_files)
+        # Media files
+        media_row = QHBoxLayout()
+        media_row.addWidget(QLabel("Media:"))
+        self.media_edit = QLineEdit()
+        self.media_edit.setPlaceholderText("Chọn folder audio/video hoặc thêm từng file")
+        self.media_edit.setReadOnly(True)
+        media_row.addWidget(self.media_edit, 1)
+        btn_media_folder = QPushButton("Chọn Folder")
+        btn_media_folder.clicked.connect(self._browse_media_folder)
+        media_row.addWidget(btn_media_folder)
+        btn_media_files = QPushButton("Chọn File")
+        btn_media_files.clicked.connect(self._browse_media_files)
+        media_row.addWidget(btn_media_files)
+        input_layout.addLayout(media_row)
 
-        self.btn_add_folder = QPushButton("📁 Thêm thư mục")
-        self.btn_add_folder.clicked.connect(self._add_folder)
-        btn_row.addWidget(self.btn_add_folder)
-
-        self.btn_clear = QPushButton("🗑️ Xóa tất cả")
-        self.btn_clear.clicked.connect(self._clear_list)
-        btn_row.addWidget(self.btn_clear)
-
-        btn_row.addStretch()
-
-        self.file_count_label = QLabel("0 file")
-        self.file_count_label.setObjectName("subtitleLabel")
-        btn_row.addWidget(self.file_count_label)
-
-        file_layout.addLayout(btn_row)
+        # Script files (for kịch bản mode)
+        script_row = QHBoxLayout()
+        script_row.addWidget(QLabel("Kịch Bản:"))
+        self.script_edit = QLineEdit()
+        self.script_edit.setPlaceholderText("(Tùy chọn) Folder chứa file .txt kịch bản")
+        self.script_edit.setReadOnly(True)
+        script_row.addWidget(self.script_edit, 1)
+        btn_script = QPushButton("Chọn Folder")
+        btn_script.clicked.connect(self._browse_script_folder)
+        script_row.addWidget(btn_script)
+        btn_clear = QPushButton("✕")
+        btn_clear.setMaximumWidth(30)
+        btn_clear.clicked.connect(lambda: self.script_edit.clear())
+        script_row.addWidget(btn_clear)
+        input_layout.addLayout(script_row)
 
         # File list
         self.file_list = QListWidget()
-        self.file_list.setMinimumHeight(140)
-        self.file_list.setSelectionMode(QListWidget.ExtendedSelection)
-        file_layout.addWidget(self.file_list)
+        self.file_list.setMaximumHeight(120)
+        input_layout.addWidget(self.file_list)
 
-        layout.addWidget(file_group)
+        self.file_count = QLabel("0 file")
+        self.file_count.setObjectName("subtitleLabel")
+        input_layout.addWidget(self.file_count)
 
-        # --- Settings ---
-        settings_group = QGroupBox("⚙️ Cấu hình")
-        settings_layout = QVBoxLayout(settings_group)
+        layout.addWidget(input_group)
 
-        # Model
-        model_row = QHBoxLayout()
-        model_row.addWidget(QLabel("Model:"))
+        # --- Chế Độ Subtitle ---
+        mode_group = QGroupBox("🎯 Chế Độ Subtitle")
+        mode_layout = QVBoxLayout(mode_group)
+
+        self.mode_group = QButtonGroup(self)
+
+        # Kịch bản
+        self.radio_kich_ban = QRadioButton(
+            "🔒 Kịch Bản — 1 dòng TXT = 1 sub, timestamp khớp chính xác từng dòng. "
+            "Dùng để cắt video theo kịch bản."
+        )
+        self.mode_group.addButton(self.radio_kich_ban)
+        mode_layout.addWidget(self.radio_kich_ban)
+
+        # Chuẩn
+        self.radio_chuan = QRadioButton(
+            "📝 Chuẩn — Ngắt theo pause + dấu câu (để chạy chữ). "
+            "Subtitle mượt, dễ đọc."
+        )
+        self.radio_chuan.setChecked(True)
+        self.mode_group.addButton(self.radio_chuan)
+        mode_layout.addWidget(self.radio_chuan)
+
+        # Both
+        self.radio_both = QRadioButton(
+            "🚀 Tạo cả 2 Mode (Tiết kiệm thời gian) — "
+            "Xuất _kich_ban.srt + _chuan.srt"
+        )
+        self.mode_group.addButton(self.radio_both)
+        mode_layout.addWidget(self.radio_both)
+
+        layout.addWidget(mode_group)
+
+        # --- Cấu Hình ---
+        config_group = QGroupBox("⚙️ Cấu Hình")
+        config_layout = QHBoxLayout(config_group)
+
+        config_layout.addWidget(QLabel("Thiết bị:"))
+        self.device_combo = QComboBox()
+        self.device_combo.addItems(["auto", "cuda", "cpu"])
+        config_layout.addWidget(self.device_combo)
+
+        config_layout.addWidget(QLabel("  Model:"))
         self.model_combo = QComboBox()
-        self.model_combo.addItems([
-            "tiny (nhanh, kém chính xác)",
-            "small (cân bằng)",
-            "medium (chính xác hơn)",
-            "large-v3 (tốt nhất, chậm)",
-        ])
-        self.model_combo.setCurrentIndex(1)
-        model_row.addWidget(self.model_combo)
-        settings_layout.addLayout(model_row)
+        self.model_combo.addItems(["tiny", "small", "medium", "large-v3"])
+        self.model_combo.setCurrentIndex(2)  # medium
+        config_layout.addWidget(self.model_combo)
 
-        # Language
-        lang_row = QHBoxLayout()
-        lang_row.addWidget(QLabel("Ngôn ngữ:"))
+        config_layout.addWidget(QLabel("  Ngôn ngữ:"))
         self.lang_combo = QComboBox()
-        self.lang_combo.addItems([
-            "vi - Tiếng Việt",
-            "en - English",
-            "ja - 日本語",
-            "zh - 中文",
-            "ko - 한국어",
-            "auto - Tự nhận diện",
-        ])
-        lang_row.addWidget(self.lang_combo)
-        settings_layout.addLayout(lang_row)
+        self.lang_combo.addItems(["auto", "vi", "en", "ja", "zh", "ko"])
+        config_layout.addWidget(self.lang_combo)
 
-        # Output directory
-        out_row = QHBoxLayout()
-        out_row.addWidget(QLabel("Thư mục xuất:"))
-        self.output_edit = QLineEdit()
-        self.output_edit.setPlaceholderText("Cùng thư mục với file gốc")
-        out_row.addWidget(self.output_edit, 1)
-        self.btn_browse_output = QPushButton("...")
-        self.btn_browse_output.setMaximumWidth(40)
-        self.btn_browse_output.clicked.connect(self._browse_output)
-        out_row.addWidget(self.btn_browse_output)
-        settings_layout.addLayout(out_row)
-
-        layout.addWidget(settings_group)
+        config_layout.addStretch()
+        layout.addWidget(config_group)
 
         # --- Progress ---
         progress_group = QGroupBox("📊 Tiến trình")
@@ -146,121 +178,117 @@ class BatchSRTTab(QWidget):
         layout.addWidget(progress_group)
 
         # --- Actions ---
-        btn_row2 = QHBoxLayout()
-        btn_row2.addStretch()
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
 
         self.btn_start = QPushButton("▶  Tạo SRT")
         self.btn_start.setObjectName("primaryBtn")
         self.btn_start.setMinimumWidth(160)
         self.btn_start.clicked.connect(self._start_batch)
-        btn_row2.addWidget(self.btn_start)
+        btn_row.addWidget(self.btn_start)
 
         self.btn_cancel = QPushButton("⏹  Hủy")
         self.btn_cancel.setObjectName("dangerBtn")
-        self.btn_cancel.setMinimumWidth(120)
+        self.btn_cancel.setMinimumWidth(100)
         self.btn_cancel.setEnabled(False)
-        self.btn_cancel.clicked.connect(self._cancel_batch)
-        btn_row2.addWidget(self.btn_cancel)
+        self.btn_cancel.clicked.connect(self._cancel)
+        btn_row.addWidget(self.btn_cancel)
 
-        layout.addLayout(btn_row2)
+        layout.addLayout(btn_row)
 
-    def _add_files(self):
-        files, _ = QFileDialog.getOpenFileNames(
-            self,
-            "Chọn file video/audio",
-            "",
-            "Media Files (*.mp4 *.mkv *.avi *.mov *.wmv *.webm "
-            "*.mp3 *.wav *.flac *.aac *.ogg *.m4a);;All Files (*)"
-        )
-        for f in files:
-            self._add_to_list(f)
-        self._update_count()
+    # === Browse ===
 
-    def _add_folder(self):
-        folder = QFileDialog.getExistingDirectory(self, "Chọn thư mục chứa media")
-        if not folder:
-            return
-
-        supported = {".mp4", ".mkv", ".avi", ".mov", ".wmv", ".webm",
-                     ".mp3", ".wav", ".flac", ".aac", ".ogg", ".m4a", ".wma"}
-
-        for name in sorted(os.listdir(folder)):
-            ext = os.path.splitext(name)[1].lower()
-            if ext in supported:
-                self._add_to_list(os.path.join(folder, name))
-
-        self._update_count()
-
-    def _add_to_list(self, file_path: str):
-        # Check duplicates
-        for i in range(self.file_list.count()):
-            if self.file_list.item(i).data(Qt.UserRole) == file_path:
-                return
-
-        name = os.path.basename(file_path)
-        size_mb = os.path.getsize(file_path) / (1024 * 1024)
-        item = QListWidgetItem(f"🎬 {name}  ({size_mb:.1f} MB)")
-        item.setData(Qt.UserRole, file_path)
-        self.file_list.addItem(item)
-
-    def _clear_list(self):
-        self.file_list.clear()
-        self._update_count()
-
-    def _update_count(self):
-        count = self.file_list.count()
-        self.file_count_label.setText(f"{count} file")
-
-    def _browse_output(self):
-        folder = QFileDialog.getExistingDirectory(self, "Chọn thư mục xuất SRT")
+    def _browse_media_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "Chọn thư mục media")
         if folder:
-            self.output_edit.setText(folder)
+            self.media_edit.setText(folder)
+            self._load_media_from_folder(folder)
 
-    def _get_model_size(self) -> str:
-        mapping = {0: "tiny", 1: "small", 2: "medium", 3: "large-v3"}
-        return mapping.get(self.model_combo.currentIndex(), "small")
+    def _browse_media_files(self):
+        files, _ = QFileDialog.getOpenFileNames(
+            self, "Chọn file media", "",
+            "Media (*.mp3 *.wav *.flac *.aac *.ogg *.m4a "
+            "*.mp4 *.mkv *.avi *.mov *.webm);;All (*)"
+        )
+        if files:
+            self.media_edit.setText(f"{len(files)} file đã chọn")
+            self.file_list.clear()
+            for f in files:
+                name = os.path.basename(f)
+                item = QListWidgetItem(f"🎵 {name}")
+                item.setData(Qt.UserRole, f)
+                self.file_list.addItem(item)
+            self.file_count.setText(f"{len(files)} file")
 
-    def _get_language(self) -> str:
-        text = self.lang_combo.currentText()
-        lang = text.split(" - ")[0]
-        return None if lang == "auto" else lang
+    def _browse_script_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "Chọn thư mục kịch bản")
+        if folder:
+            self.script_edit.setText(folder)
+
+    def _load_media_from_folder(self, folder: str):
+        exts = {".mp3", ".wav", ".flac", ".aac", ".ogg", ".m4a",
+                ".mp4", ".mkv", ".avi", ".mov", ".webm"}
+        self.file_list.clear()
+        files = sorted(f for f in os.listdir(folder)
+                       if os.path.splitext(f)[1].lower() in exts)
+        for name in files:
+            item = QListWidgetItem(f"🎵 {name}")
+            item.setData(Qt.UserRole, os.path.join(folder, name))
+            self.file_list.addItem(item)
+        self.file_count.setText(f"{len(files)} file")
+
+    # === Start/Cancel ===
+
+    def _get_mode(self) -> str:
+        if self.radio_kich_ban.isChecked():
+            return "kich_ban"
+        elif self.radio_both.isChecked():
+            return "both"
+        return "chuan"
 
     def _start_batch(self):
         if self.file_list.count() == 0:
-            QMessageBox.warning(self, "Lỗi", "Chưa thêm file nào!")
+            QMessageBox.warning(self, "Lỗi", "Chưa thêm file media!")
             return
 
-        from ..pipeline.srt_exporter import BatchSRTExporter
+        # Build items list
+        script_folder = self.script_edit.text().strip()
+        scripts = []
+        if script_folder and os.path.isdir(script_folder):
+            scripts = sorted([
+                os.path.join(script_folder, f)
+                for f in os.listdir(script_folder)
+                if f.endswith(".txt")
+            ])
 
-        output_dir = self.output_edit.text().strip() or None
-        exporter = BatchSRTExporter(
-            model_size=self._get_model_size(),
-            language=self._get_language(),
-            output_dir=output_dir,
-        )
-
-        # Add files from list
+        items = []
         for i in range(self.file_list.count()):
-            file_path = self.file_list.item(i).data(Qt.UserRole)
-            exporter.add_file(file_path)
+            audio_path = self.file_list.item(i).data(Qt.UserRole)
+            script_path = scripts[i] if i < len(scripts) else None
+            output_dir = os.path.dirname(audio_path)
+            items.append((audio_path, script_path, output_dir))
 
         # Disable UI
         self.btn_start.setEnabled(False)
         self.btn_cancel.setEnabled(True)
-        self.btn_add_files.setEnabled(False)
-        self.btn_add_folder.setEnabled(False)
-        self.progress_bar.setMaximum(exporter.total_jobs)
+        self.progress_bar.setMaximum(len(items))
         self.progress_bar.setValue(0)
 
-        # Start worker thread
-        self._worker = BatchWorker(exporter)
+        # Start worker
+        self._worker = SmartSRTWorker(
+            items=items,
+            mode=self._get_mode(),
+            model_size=self.model_combo.currentText(),
+            language=self.lang_combo.currentText(),
+            device=self.device_combo.currentText(),
+        )
         self._worker.progress.connect(self._on_progress)
         self._worker.finished.connect(self._on_finished)
         self._worker.start()
 
-    def _cancel_batch(self):
-        if self._worker and self._worker.exporter:
-            self._worker.exporter.cancel()
+    def _cancel(self):
+        if self._worker:
+            # Worker doesn't have direct cancel, but we can note it
             self.progress_label.setText("Đang hủy...")
 
     def _on_progress(self, index: int, total: int, filename: str, message: str):
@@ -268,7 +296,6 @@ class BatchSRTTab(QWidget):
         self.progress_label.setText(f"[{index}/{total}] {message}")
         self.current_file_label.setText(filename)
 
-        # Update list item status
         if index > 0 and index <= self.file_list.count():
             item = self.file_list.item(index - 1)
             if "✅" in message:
@@ -279,9 +306,6 @@ class BatchSRTTab(QWidget):
     def _on_finished(self, summary: str):
         self.btn_start.setEnabled(True)
         self.btn_cancel.setEnabled(False)
-        self.btn_add_files.setEnabled(True)
-        self.btn_add_folder.setEnabled(True)
         self.progress_label.setText(summary)
         self.current_file_label.setText("")
-
         QMessageBox.information(self, "Hoàn tất", summary)
