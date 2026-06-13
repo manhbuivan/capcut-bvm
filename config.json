@@ -1,0 +1,7 @@
+{
+  "capcut_drafts_path": "",
+  "whisper_model": "small",
+  "language": "vi",
+  "output_dir": "",
+  "ffmpeg_path": "ffmpeg"
+}
