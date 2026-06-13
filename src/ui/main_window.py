@@ -9,6 +9,7 @@ from PySide6.QtGui import QFont
 from .dark_theme import DARK_STYLESHEET
 from .auto_render_tab import AutoRenderTab
 from .batch_srt_tab import BatchSRTTab
+from .script_align_tab import ScriptAlignTab
 from .manual_fx_tab import ManualFXTab
 from .support_tab import SupportTab
 
@@ -44,11 +45,13 @@ class MainWindow(QMainWindow):
         # Add tabs
         self.auto_render_tab = AutoRenderTab()
         self.batch_srt_tab = BatchSRTTab()
+        self.script_align_tab = ScriptAlignTab()
         self.manual_fx_tab = ManualFXTab()
         self.support_tab = SupportTab()
 
         self.tabs.addTab(self.auto_render_tab, "🎬 Auto Render")
         self.tabs.addTab(self.batch_srt_tab, "📝 Batch SRT")
+        self.tabs.addTab(self.script_align_tab, "🔗 Ghép kịch bản")
         self.tabs.addTab(self.manual_fx_tab, "✨ Manual FX")
         self.tabs.addTab(self.support_tab, "💬 Hỗ trợ")
 
