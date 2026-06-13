@@ -11,6 +11,7 @@ from .auto_render_tab import AutoRenderTab
 from .batch_srt_tab import BatchSRTTab
 from .script_align_tab import ScriptAlignTab
 from .video_compose_tab import VideoComposeTab
+from .sync_compose_tab import SyncComposeTab
 from .manual_fx_tab import ManualFXTab
 from .support_tab import SupportTab
 
@@ -47,14 +48,16 @@ class MainWindow(QMainWindow):
         self.auto_render_tab = AutoRenderTab()
         self.batch_srt_tab = BatchSRTTab()
         self.script_align_tab = ScriptAlignTab()
+        self.sync_compose_tab = SyncComposeTab()
         self.video_compose_tab = VideoComposeTab()
         self.manual_fx_tab = ManualFXTab()
         self.support_tab = SupportTab()
 
-        self.tabs.addTab(self.auto_render_tab, "🎬 Auto Render")
+        self.tabs.addTab(self.sync_compose_tab, "🎬 Sync Video")
         self.tabs.addTab(self.batch_srt_tab, "📝 Batch SRT")
         self.tabs.addTab(self.script_align_tab, "🔗 Ghép kịch bản")
         self.tabs.addTab(self.video_compose_tab, "🎥 Tạo Video")
+        self.tabs.addTab(self.auto_render_tab, "⚡ Auto Render")
         self.tabs.addTab(self.manual_fx_tab, "✨ Manual FX")
         self.tabs.addTab(self.support_tab, "💬 Hỗ trợ")
 
